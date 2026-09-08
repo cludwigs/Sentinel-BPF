@@ -47,25 +47,18 @@ It raises an alert when protection flags include executable permissions, and it 
 
 This is an important step toward behavior-based detection of code injection.
 
-### 5. Shellcode-like behavioral detection
+### 5. Shellcode-like behavioral detection & prevention
 
-A heuristic has been added to flag the classic “write + execute” pattern in memory.
+A behavioral rule prevents and alerts on the classic “write + execute” memory pattern.
+- When an `mprotect` call attempts to set both `PROT_WRITE` and `PROT_EXEC`, the operation is blocked in kernel-space by returning `-EPERM`.
+- A structured critical event is submitted to user space to log the attempt.
+- Regular executable mapping changes are logged separately as warning alerts without emitting duplicate events.
 
-The logic is intentionally simple and prototype-oriented:
+### 6. Cross-process access prevention (LSM)
 
-- when a memory protection pattern suggests executable memory is being used
-- and the process is involved in a suspicious executable-memory flow
-- an alert is emitted as a shellcode-style injection event
-
-This is not a full shellcode detector, but it is a realistic first behavioral layer for injection detection.
-
-### 6. Cross-process access detection
-
-The project includes a tracepoint-based detection of `ptrace` activity.
-
-This catches calls that attempt to attach or interact with another process and emits a security event with the target PID.
-
-This makes the tool capable of identifying one of the classic signals of process tampering and memory injection.
+Cross-process inspection and injection attempts via `ptrace` are intercepted directly through the `ptrace_access_check` LSM hook.
+- Targets are verified in-kernel through the target `task_struct`.
+- Unauthorized ptrace attachments are blocked at the LSM boundary (`-EPERM`).
 
 ---
 
@@ -94,9 +87,8 @@ It contains:
 - execution blocking through `bprm_check_security`
 - denylist lookup with a BPF hash map
 - ring buffer event emission
-- executable-memory monitoring
-- first shellcode-like behavior heuristic
-- `ptrace` access detection via a syscall tracepoint
+- executable-memory monitoring and W+X blocking in `file_mprotect`
+- ptrace access prevention via `lsm/ptrace_access_check`
 
 ### User-space side
 

@@ -97,29 +97,9 @@ int BPF_PROG(restrict_execution, struct linux_binprm *bprm, int ret) {
 SEC("lsm/file_mprotect")
 int BPF_PROG(file_mprotect, struct vm_area_struct *vma, unsigned long reqprot, unsigned long prot, unsigned long flags) {
     unsigned long permissions = reqprot | prot;
+    int block = 0;
 
-    if ((permissions & 0x4) != 0) {
-        struct block_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-        if (e) {
-            struct task_struct *task = (struct task_struct *)bpf_get_current_task();
-            u64 id = bpf_get_current_pid_tgid();
-
-            e->pid = id >> 32;
-            e->uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
-            e->ppid = BPF_CORE_READ(task, real_parent, tgid);
-            e->target_pid = 0;
-            e->blocked = 0;
-            e->event_type = EVENT_MEMORY_EXEC;
-            e->severity = EVENT_WARNING;
-            e->action = ACTION_ALERT;
-            e->prot = (unsigned int)permissions;
-            __builtin_memset(e->comm, 0, sizeof(e->comm));
-            __builtin_memset(e->filename, 0, sizeof(e->filename));
-            bpf_get_current_comm(&e->comm, sizeof(e->comm));
-            bpf_ringbuf_submit(e, 0);
-        }
-    }
-
+    /* Heuristique critique : détection W+X (PROT_WRITE | PROT_EXEC) */
     if (((permissions & 0x6) == 0x6) && (permissions & 0x4)) {
         struct block_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
         if (e) {
@@ -134,6 +114,29 @@ int BPF_PROG(file_mprotect, struct vm_area_struct *vma, unsigned long reqprot, u
             e->event_type = EVENT_SHELLCODE_INJECT;
             e->severity = EVENT_CRITICAL;
             e->action = ACTION_BLOCK;
+            e->prot = (unsigned int)permissions;
+            __builtin_memset(e->comm, 0, sizeof(e->comm));
+            __builtin_memset(e->filename, 0, sizeof(e->filename));
+            bpf_get_current_comm(&e->comm, sizeof(e->comm));
+            bpf_ringbuf_submit(e, 0);
+        }
+        return -EPERM;
+    }
+    /* Surveillance : allocation/modification de mémoire exécutable simple */
+    else if ((permissions & 0x4) != 0) {
+        struct block_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+        if (e) {
+            struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+            u64 id = bpf_get_current_pid_tgid();
+
+            e->pid = id >> 32;
+            e->uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+            e->ppid = BPF_CORE_READ(task, real_parent, tgid);
+            e->target_pid = 0;
+            e->blocked = 0;
+            e->event_type = EVENT_MEMORY_EXEC;
+            e->severity = EVENT_WARNING;
+            e->action = ACTION_ALERT;
             e->prot = (unsigned int)permissions;
             __builtin_memset(e->comm, 0, sizeof(e->comm));
             __builtin_memset(e->filename, 0, sizeof(e->filename));
@@ -176,4 +179,35 @@ int trace_ptrace_entry(struct trace_event_raw_sys_enter *ctx) {
     bpf_ringbuf_submit(e, 0);
 
     return 0;
+}
+
+SEC("lsm/ptrace_access_check")
+int BPF_PROG(ptrace_access_check, struct task_struct *child, unsigned int mode) {
+    struct task_struct *task = (struct task_struct *)bpf_get_current_task();
+    u64 id = bpf_get_current_pid_tgid();
+    pid_t target_pid = BPF_CORE_READ(child, tgid);
+
+    /* Ne pas s'alerter si un processus inspecte son propre thread / process */
+    if ((id >> 32) == target_pid) {
+        return 0;
+    }
+
+    struct block_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (e) {
+        e->pid = id >> 32;
+        e->ppid = BPF_CORE_READ(task, real_parent, tgid);
+        e->target_pid = target_pid;
+        e->uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
+        e->blocked = 1;
+        e->event_type = EVENT_PTRACE_ACCESS;
+        e->severity = EVENT_CRITICAL;
+        e->action = ACTION_BLOCK;
+        e->prot = mode;
+        __builtin_memset(e->comm, 0, sizeof(e->comm));
+        __builtin_memset(e->filename, 0, sizeof(e->filename));
+        bpf_get_current_comm(&e->comm, sizeof(e->comm));
+        bpf_ringbuf_submit(e, 0);
+    }
+
+    return -EPERM;
 }
