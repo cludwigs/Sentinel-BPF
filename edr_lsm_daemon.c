@@ -3,6 +3,7 @@
 #include <string.h>
 #include <signal.h>
 #include <unistd.h>
+#include <arpa/inet.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "common.h"
@@ -20,6 +21,10 @@ static const char *event_name(unsigned int event_type) {
         return "PTRACE_ACCESS";
     case EVENT_SHELLCODE_INJECT:
         return "SHELLCODE_INJECTION";
+    case EVENT_SOCKET_CONNECT:
+        return "SOCKET_CONNECT";
+    case EVENT_PRIV_ESCALATION:
+        return "PRIV_ESCALATION";
     default:
         return "UNKNOWN";
     }
@@ -86,6 +91,25 @@ static void load_default_policy(int map_fd) {
     }
 }
 
+static void load_jit_allowlist(int map_fd) {
+    static const char *allowed_comms[] = {
+        "node",
+        "java",
+        "python3",
+        "firefox",
+        "chrome",
+        NULL
+    };
+
+    for (int i = 0; allowed_comms[i] != NULL; ++i) {
+        struct allow_comm_key key = {0};
+        strncpy(key.comm, allowed_comms[i], sizeof(key.comm) - 1);
+        unsigned int val = 1;
+        bpf_map_update_elem(map_fd, &key, &val, BPF_ANY);
+    }
+    printf("[+] Whitelist JIT chargée (process autorisés à mprotect EXEC).\n");
+}
+
 static int remove_blocked_binary(int map_fd, const char *name) {
     struct block_key key = {0};
     strncpy(key.filename, name, sizeof(key.filename) - 1);
@@ -120,11 +144,32 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
     }
 
     if (e->event_type == EVENT_SHELLCODE_INJECT) {
-        printf("\033[1;31m[SHELLCODE]\033[0m PID %d (%s) : écriture + exécution mémoire détectée (prot=0x%x) -> %s\n",
+        printf("\033[1;31m[SHELLCODE]\033[0m PID %d (%s) : écriture + exécution mémoire (W+X) détectée (prot=0x%x) -> %s\n",
                e->pid,
                e->comm,
                e->prot,
                action_name(e->action));
+        return 0;
+    }
+
+    if (e->event_type == EVENT_SOCKET_CONNECT) {
+        char ip_str[INET_ADDRSTRLEN] = {0};
+        struct in_addr addr = { .s_addr = e->daddr };
+        inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str));
+
+        if (e->severity == EVENT_CRITICAL) {
+            printf("\033[1;31m[NET-SUSPECT]\033[0m PID %d (%s) se connecte vers %s:%u [%s/%s]\n",
+                   e->pid, e->comm, ip_str, e->dport, severity_name(e->severity), action_name(e->action));
+        } else {
+            printf("\033[1;36m[NET-CONNECT]\033[0m PID %d (%s) se connecte vers %s:%u\n",
+                   e->pid, e->comm, ip_str, e->dport);
+        }
+        return 0;
+    }
+
+    if (e->event_type == EVENT_PRIV_ESCALATION) {
+        printf("\033[1;41;37m[PRIV_ESCALATION]\033[0m PID %d (%s) : passage de UID %u à ROOT (UID 0) détecté ! [%s/%s]\n",
+               e->pid, e->comm, e->prot, severity_name(e->severity), action_name(e->action));
         return 0;
     }
 
@@ -152,7 +197,7 @@ static int handle_event(void *ctx, void *data, size_t data_sz) {
 int main(void) {
     struct edr_lsm_bpf *skel;
     struct ring_buffer *rb = NULL;
-    int map_fd, err;
+    int denied_map_fd, allow_map_fd, err;
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
@@ -163,8 +208,11 @@ int main(void) {
         return 1;
     }
 
-    map_fd = bpf_map__fd(skel->maps.denied_binaries);
-    load_default_policy(map_fd);
+    denied_map_fd = bpf_map__fd(skel->maps.denied_binaries);
+    load_default_policy(denied_map_fd);
+
+    allow_map_fd = bpf_map__fd(skel->maps.mprotect_allowlist);
+    load_jit_allowlist(allow_map_fd);
 
     err = edr_lsm_bpf__attach(skel);
     if (err) {
@@ -177,8 +225,7 @@ int main(void) {
         goto cleanup;
     }
 
-    printf("[*] EDR actif. Essayez de lancer 'nc' ou 'socat' dans un autre terminal.\n");
-    printf("[*] La détection mémoire exécutable est activée en mode surveillance.\n");
+    printf("[*] Sentinel-BPF actif. Surveillance LSM en cours...\n");
 
     while (!exiting) {
         err = ring_buffer__poll(rb, 100);

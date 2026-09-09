@@ -60,6 +60,27 @@ Cross-process inspection and injection attempts via `ptrace` are intercepted dir
 - Targets are verified in-kernel through the target `task_struct`.
 - Unauthorized ptrace attachments are blocked at the LSM boundary (`-EPERM`).
 
+### 7. Absolute Path Resolution & Suspicious Directory Prevention
+
+Executable paths are now resolved directly in the kernel using `bpf_d_path`.
+- Prevents evasion through binary renaming or execution via symbolic links.
+- Automatically blocks execution originating from high-risk locations such as `/tmp/` and `/dev/shm/`.
+
+### 8. JIT False-Positive Suppression
+
+An exclusion BPF hash map (`mprotect_allowlist`) allows recognized JIT runtimes (such as `node`, `python3`, `java`) to allocate executable memory without triggering false-positive alerts, keeping critical alerts focused on non-allowlisted binaries.
+
+### 9. Network Connection Monitoring (`socket_connect`)
+
+Monitors outgoing IPv4 TCP/UDP connection initiations via the `lsm/socket_connect` hook.
+- Enriches events with destination IPv4 and destination port.
+- Flags connections to common C2/reverse-shell ports (e.g., 4444, 1337) with CRITICAL severity.
+
+### 10. Privilege Escalation Detection (`task_fix_setuid`)
+
+Monitors credential modifications via `lsm/task_fix_setuid`.
+- Detects transitions from non-root UIDs to `uid == 0` (root), signaling potential local privilege escalation (LPE) exploits.
+
 ---
 
 ## What is still limited
@@ -84,11 +105,13 @@ The main logic is in [edr_lsm.bpf.c](edr_lsm.bpf.c).
 
 It contains:
 
-- execution blocking through `bprm_check_security`
-- denylist lookup with a BPF hash map
-- ring buffer event emission
-- executable-memory monitoring and W+X blocking in `file_mprotect`
-- ptrace access prevention via `lsm/ptrace_access_check`
+- Full path extraction with `bpf_d_path` and blocking of `/tmp/` & `/dev/shm/` executions
+- Binary execution denylist lookup via BPF hash map
+- Ring buffer telemetry pipeline
+- W+X shellcode injection blocking and JIT-whitelisted `mprotect` monitoring
+- Ptrace access prevention via `lsm/ptrace_access_check`
+- Network outbound connection tracking via `lsm/socket_connect`
+- Root privilege escalation alerts via `lsm/task_fix_setuid`
 
 ### User-space side
 

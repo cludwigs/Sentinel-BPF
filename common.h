@@ -8,11 +8,11 @@
 #define EVENT_MEMORY_EXEC        2u
 #define EVENT_PTRACE_ACCESS      3u
 #define EVENT_SHELLCODE_INJECT   4u
-
+#define EVENT_SOCKET_CONNECT     5u
+#define EVENT_PRIV_ESCALATION    6u
 #define EVENT_INFO     0u
 #define EVENT_WARNING  1u
 #define EVENT_CRITICAL 2u
-
 #define ACTION_ALLOW   0u
 #define ACTION_ALERT   1u
 #define ACTION_BLOCK   2u
@@ -25,6 +25,10 @@ struct block_key {
 // Valeur associée : 1 pour actif (permet d'étendre avec des flags de sévérité plus tard)
 struct block_value {
     unsigned int flags;
+};
+
+struct allow_comm_key {
+    char comm[TASK_COMM_LEN];
 };
 
 // Structure d'événement RingBuffer
@@ -40,6 +44,8 @@ struct block_event {
     unsigned int severity;
     unsigned int action;
     unsigned int prot;
+    unsigned int daddr;     
+    unsigned short dport;
 };
 
 #endif
